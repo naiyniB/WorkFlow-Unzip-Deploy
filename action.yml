@@ -1,4 +1,4 @@
-name: 自动部署 - 从指定目录解压并发布
+name: yian-自动部署 - 从指定目录解压并发布
 description: 找出指定文件夹中最新的 zip 包，解压后替换根目录内容，并自动提交。
 author: Yian
 
