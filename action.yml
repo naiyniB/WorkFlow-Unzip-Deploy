@@ -1,15 +1,23 @@
-name: 自动部署 - 从 public 解压并发布
-description: 找出 public 文件夹中最新的 zip 包，解压后替换根目录内容，并自动提交。
-
-
+name: 自动部署 - 从指定目录解压并发布
+description: 找出指定文件夹中最新的 zip 包，解压后替换根目录内容，并自动提交。
 author: Yian
 
 # 输入参数
 inputs:
-  zip目录:
+  File_directory:
     description: "zip 文件所在的文件夹路径，默认是 public"
     required: false
     default: "public"
+  exclude_files:
+    description: |
+      在默认保留项（.git|.github|public|temp）基础上，额外保留的文件或文件夹（用 | 分隔）。
+      例如填写：CNAME|README.md，则最终保留项为 .git|.github|public|temp|CNAME|README.md
+    required: false
+    default: "" # 注意：此时 default 可设为空，因为逻辑上已内置默认值
+  delete_zip_directory:
+    description: "是否删除 zip 目录? true 或 false 默认是删除"
+    required: false
+    default: "true"
 
 # 定义运行环境和步骤
 runs:
@@ -17,13 +25,13 @@ runs:
   steps:
     # 第一步：拉取代码
     - name: 拉取代码
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v2
 
-    # 第二步：检查 public 文件夹是否存在
-    - name: 检查 zip 目录是否存在
+    # 检查是不是存在 File_directory 文件夹
+    - name: 检查 File_directory 目录是否存在
       shell: bash
       run: |
-        DIR="${{ inputs.zip目录 }}"
+        DIR="${{ inputs.File_directory }}"
         if [ -d "$DIR" ]; then
           echo "✅ $DIR 目录存在"
         else
@@ -31,20 +39,17 @@ runs:
           exit 1
         fi
 
-    # 第三步：找出最新的 zip 文件
-    - name: 查找最新的 zip 文件
-      id: find_zip 
+    # 第三步：找出最新的文件
+    - name: 查找最新的文件
       shell: bash
       run: |
-        cd ${{ inputs.zip目录 }} || exit 1
-        # 按时间排序，取第一个 zip 文件
+        cd "${{ inputs.File_directory }}" || { echo "❌ 进入目录失败"; exit 1; }
         LATEST=$(ls -t *.zip 2>/dev/null | head -n 1)
         if [ -z "$LATEST" ]; then
-          echo "❌ 没有在 ${{ inputs.zip目录 }} 找到任何 zip 文件"
+          echo "❌ 没有在 ${{ inputs.File_directory }} 找到任何 zip 文件"
           exit 1
         else
           echo "📦 找到最新压缩包：$LATEST"
-          # 把结果存到环境变量，供后面使用
           echo "LATEST_ZIP=$LATEST" >> $GITHUB_ENV
         fi
 
@@ -52,54 +57,104 @@ runs:
     - name: 解压文件到 temp
       shell: bash
       run: |
-        unzip -o "${{ inputs.zip目录 }}/$LATEST_ZIP" -d ./temp
+        cd "${{ inputs.File_directory }}" || { echo "$DIR" 目录不存在或无法进入"; exit 1; }
+        unzip -o "$LATEST_ZIP" -d ../temp || { echo "解压失败"; exit 1; }
         echo "✅ 解压完成"
 
-    # 第五步：清理根目录（保留 .git .github public）
+    # 第五步：创建保留文件列表
+    - name: 创建保留文件列表
+      shell: bash
+      run: |
+        DEFAULT_EXCLUDES=".git|.github|temp|${{ inputs.File_directory }}"
+        if [ -z "${{ inputs.exclude_files }}" ]; then
+          EXCLUDE_PATTERN="$DEFAULT_EXCLUDES"
+        else
+          EXCLUDE_PATTERN="$DEFAULT_EXCLUDES|${{ inputs.exclude_files }}"
+        fi
+        echo "保留文件模式：$EXCLUDE_PATTERN"
+        echo "EXCLUDE_PATTERN=$EXCLUDE_PATTERN" >> $GITHUB_ENV
+
+    # 第六步：清理根目录（保留指定文件）
     - name: 清理旧文件
       shell: bash
       run: |
-        echo "🧹 开始清理根目录..."
+        echo "🧹 开始清理根目录... 保留：$EXCLUDE_PATTERN"
+
         for item in ./*; do
-          case "${item#./}" in
-            .git|.github|public|temp)
+          basename="${item#./}"
+          
+          case "|$EXCLUDE_PATTERN|" in
+            *"|$basename|"*)
               echo "🔁 保留: $item"
               ;;
             *)
               echo "🗑️ 删除: $item"
               rm -rf "$item"
-              ;;
           esac
         done
         echo "✅ 清理完成"
 
-    # 第六步：把解压的内容移到根目录
     - name: 移动新文件到根目录
       shell: bash
       run: |
-        mv temp/* . || { echo "移动文件失败"; exit 1; }
-        rm -rf temp || { echo "删除 temp 失败"; exit 1; }
-        echo "✅ 文件已移动到根目录"
+        echo "🚚 开始移动 temp/ 中的文件到根目录..."
 
-    # 第七步：删除 public 文件夹（可选）
-    - name: 删除 public 目录
+        # 检查 temp 是否存在且为目录
+        if [ ! -d "temp" ]; then
+          echo "🔸 temp 目录不存在，跳过移动。"
+          echo "✅ 文件移动完成（无文件可移动）"
+          exit 0
+        fi
+
+        # 检查 temp 是否为空
+        if [ -z "$(ls -A temp 2>/dev/null)" ]; then
+          echo "🔸 temp 目录为空，无需移动文件。"
+          rm -rf temp && echo "🗑️ 已清理空的 temp 目录"
+        else
+          # 移动所有内容（包括隐藏文件，除了 . 和 ..）
+          mv temp/* temp/.[!.]* temp/..?* . 2>/dev/null || true
+          echo "✅ 已移动 temp/ 中的文件到根目录"
+        fi
+        # 清理 temp 目录
+        rm -rf temp
+        echo "🗑️ temp 目录已删除"
+
+    # 第八步：删除 dir 目录（可选）
+    - name: 删除 dir 目录（可选）
       shell: bash
       run: |
-        rm -rf ${{ inputs.zip目录 }}
-        echo "✅ 已删除 ${{ inputs.zip目录 }}"
+        DIR_TO_DELETE="$FILE_DIRECTORY"
+        
+        if [ "${{ inputs.delete_zip_directory }}" = "true" ]; then
+          if [ -d "$DIR_TO_DELETE" ]; then
+            echo "🗑️ 正在删除目录: $DIR_TO_DELETE"
+            rm -rf "$DIR_TO_DELETE"
+            if [ $? -eq 0 ]; then
+              echo "✅ 已成功删除目录: $DIR_TO_DELETE"
+            else
+              echo "❌ 删除目录失败: $DIR_TO_DELETE"
+              exit 1
+            fi
+          else
+            echo "🔸 目录不存在，跳过删除: $DIR_TO_DELETE"
+          fi
+        else
+          echo "ℹ️ 保留目录: $DIR_TO_DELETE"
+        fi
+      env:
+        FILE_DIRECTORY: ${{ inputs.File_directory }}
 
-    # 第八步：设置 Git 用户
+    # 第九步：设置 Git 用户
     - name: 设置 Git 提交信息
       shell: bash
       run: |
         git config --global user.name "github-actions[bot]"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-    # 第九步：提交并推送
+    # 第十步：提交并推送
     - name: 提交更改并推送
       shell: bash
       run: |
         git add .
-        # 如果没有更改，就不提交
         git commit -m "🚀 自动部署：更新网站内容 [skip ci]" || echo "🔸 没有新更改，跳过提交"
         git push origin ${{ github.ref }} || echo "⚠️ 推送失败（可能无更改或分支受保护）"
